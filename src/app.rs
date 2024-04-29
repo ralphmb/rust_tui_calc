@@ -3,7 +3,9 @@ use num_parser::{
     settings::{self, AngleUnit, Rounding},
 };
 mod lib;
-use crate::app::lib::{AppMode, ContextWrapper, CursorDir, Input, ScrollDir, Scroller};
+use crate::app::lib::{
+    AppMode, ContextWrapper, CursorDir, HistoryEntry, Input, Queries, ScrollDir,
+};
 mod func;
 
 use crate::tui;
@@ -21,14 +23,10 @@ pub struct App {
     input: Input,
     // Current text in the output field, either last result or last error.
     last_output: String,
-    // Vector of user queries, if no errors occured and where no vars/functions were defined
-    hist_inputs: Vec<String>,
-    // Vector of results to those queries
-    hist_outputs: Vec<String>,
+    // Vectors of user queries, if no errors occured and where no vars/functions were defined
+    history: Queries,
     // Contains a num_parser context object. Stores the user variables/functions and is used for evaluating new queries. The wrapper is used to define the default initial state of the context, located in app/lib.rs
     ctxt: ContextWrapper<num_parser::Context>,
-    // Stores the scrolling position, as well as any user input entered before scrolling began.
-    scroller: Scroller,
     // Enum describing app state - whether to display input/option etc. windows
     mode: AppMode,
     // Triggered on exit
@@ -71,36 +69,28 @@ impl App {
                 KeyCode::Char(c) => self.input.insert(c),
                 KeyCode::Esc => {
                     // esc will either clear the input text or escape scrolling and reset back to prior input
-                    // so either retrieve stored input from scroller or reset input
+                    // so either retrieve stored input from history or reset input
                     self.input
-                        .replace(self.scroller.retrieve().unwrap_or("".to_string()));
-                    self.scroller.reset();
+                        .replace(self.history.try_restore().unwrap_or("".to_string()));
+                    self.history.scroll_reset();
                 }
-                KeyCode::Up => match self.scroller.update(ScrollDir::Up) {
-                    // scroller update returns the new position, where 0 is normal input, 1 is item 0 of the history etc.
-                    // i thought about using an enum but this seems simpler, if less rusty
-                    0 => (), // if there's no history we can't scroll, so 0 is returned
-                    1 => {
-                        // if we scroll up and hit position one then we're leaving the normal input
-                        // so we store it in the scroller
-                        self.scroller.store(self.input.get_text());
-                        self.input
-                            .replace(self.hist_inputs[self.hist_inputs.len() - 1].clone());
+                KeyCode::Up => {
+                    self.history.shift(ScrollDir::Up);
+                    self.history.try_store(self.input.get_text());
+                    match self.history.curr() {
+                        None => (),
+                        Some(s) => self.input.replace(s),
                     }
-                    n => self
-                        .input
-                        .replace(self.hist_inputs[self.hist_inputs.len() - n].clone()), //if all goes well we move up to position n
-                },
-                KeyCode::Down => match self.scroller.update(ScrollDir::Down) {
-                    // should maybe replace the zero case with a match statement to avoid the clone - TODO ?
-                    0 => self
-                        .input
-                        .replace(self.scroller.retrieve().unwrap_or(self.input.get_text())),
-                    n => {
-                        self.input
-                            .replace(self.hist_inputs[self.hist_inputs.len() - n].clone());
+                }
+                KeyCode::Down => {
+                    self.history.shift(ScrollDir::Down);
+                    match self.history.curr() {
+                        None => self
+                            .input
+                            .replace(self.history.try_restore().unwrap_or("".to_string())),
+                        Some(s) => self.input.replace(s),
                     }
-                },
+                }
                 KeyCode::Left => self.input.shift(CursorDir::Left),
                 KeyCode::Right => self.input.shift(CursorDir::Right),
                 _ => (),
@@ -160,19 +150,18 @@ impl App {
         // does actual evaluation of user inputs
         // eval_with_mutable_context allows user defined variables and functions
         let out = num_parser::eval_with_mutable_context(&*self.input.get_text(), &mut self.ctxt);
-        self.scroller.reset();
+        self.history.scroll_reset();
         match out {
             Ok(res) => match res {
                 Some(val) => {
                     // if user query is evaluated without error:
-                    self.last_output = val.to_string(); // display it in top pane
-                    self.hist_inputs.push(self.input.get_text()); // add the query and answer to the history
-                    self.hist_outputs.push(self.last_output.clone());
-                    self.scroller.inc_max(); // allow the scroller to go one step farther
+                    self.history.archive(self.input.get_text(), val.to_string());
+                    self.last_output = self.history.retrieve(HistoryEntry::Value(0)).clone(); // display it in top pane
                     self.input.reset(); // clear the current input
                 }
                 None => {
                     // no error and no return value occurs when user inputs a variable/function definition
+                    // so just clear the in/output
                     // so just clear the in/output
                     self.input.reset();
                     self.last_output = "".to_string();
@@ -300,6 +289,7 @@ impl Widget for &App {
         }
         fn render_output(
             last_out: &String,
+            debug_text: String,
             context: &num_parser::Context,
             loc: Rect,
             buf: &mut Buffer,
@@ -329,26 +319,19 @@ impl Widget for &App {
                 .borders(Borders::ALL)
                 .border_set(border::THICK);
             make_para(
-                Text::from(format!("\n{}", last_out)),
+                Text::from(format!("\n{}\n{}", last_out, debug_text)),
                 result_block,
                 loc,
                 buf,
             );
         }
-        fn render_history(inps: &Vec<String>, outs: &Vec<String>, loc: Rect, buf: &mut Buffer) {
+        fn render_history(hist_strings: Vec<String>, loc: Rect, buf: &mut Buffer) {
             let hist_title = Title::from(" History ".bold());
             let hist_block = Block::default()
                 .title(hist_title.alignment(Alignment::Center))
                 .borders(Borders::ALL)
                 .border_set(border::THICK);
-
-            let hist_strs: Vec<String> = inps
-                .iter()
-                .zip(outs.iter())
-                .rev()
-                .map(|(a, b)| format!("\n {} = {}", a, b))
-                .collect();
-            make_para(Text::from(&*hist_strs.concat()), hist_block, loc, buf);
+            make_para(Text::from(&*hist_strings.concat()), hist_block, loc, buf);
         }
         // LAYOUT
         let thirds = Layout::default()
@@ -372,14 +355,20 @@ impl Widget for &App {
 
         render_vars(&self.ctxt, left[0], buf);
         render_funcs(&self.ctxt, left[1], buf);
-        render_output(&self.last_output, &self.ctxt, middle[0], buf);
-        render_history(&self.hist_inputs, &self.hist_outputs, thirds[2], buf);
+        render_output(
+            &self.last_output,
+            self.history.get_pos().to_string(),
+            &self.ctxt,
+            middle[0],
+            buf,
+        );
+        render_history(self.history.render_all(), thirds[2], buf);
         match self.mode {
             AppMode::Option => render_options(middle[1], buf),
             AppMode::Normal => render_normal(
                 self.input.get_text(),
                 self.input.get_lens(),
-                self.scroller.get_pos(),
+                self.history.get_pos(),
                 middle[1],
                 buf,
             ),

@@ -42,52 +42,6 @@ pub enum ScrollDir {
     Down,
 }
 
-#[derive(Debug, Default)]
-pub struct Scroller {
-    position: usize,
-    max_len: usize,
-    temp: Option<String>,
-}
-impl Scroller {
-    // This struct tracks scroll position.
-    // After giving a direction to update(), it'll try to in-/decrease the scroll position
-    // subject to 0 <= position <= max_len
-    // where max_len is the number of user queries that evaluated without error:
-    // e.g. the length of the history
-    pub fn update(&mut self, dir: ScrollDir) -> usize {
-        self.position = match dir {
-            ScrollDir::Up => std::cmp::min(self.position + 1, self.max_len) as usize,
-            // bit messy but temporarily casting to i32 allows us to subtract 1 from 0.
-            ScrollDir::Down => std::cmp::max(self.position as i32 - 1i32, 0i32) as usize,
-        };
-        self.position
-    }
-    pub fn inc_max(&mut self) {
-        // called in the evaluate function in app.rs
-        self.max_len += 1;
-    }
-    pub fn store(&mut self, to_store: String) {
-        // while scrolling any text previously in the input is stored in Scroller.
-        // the `Some =>` arm should never trigger, but at the moment it would just silently be ignored
-        // this function should only be called when a value actually needs to be stored
-        // TODO - check this works when esc-ing out of a scroll - is there any way it can restore inputs that it shouldn't?
-        match self.temp {
-            None => self.temp = Some(to_store),
-            Some(_) => (),
-        }
-    }
-    pub fn retrieve(&mut self) -> Option<String> {
-        std::mem::take(&mut self.temp)
-    }
-    pub fn reset(&mut self) {
-        self.position = 0;
-        self.temp = None;
-    }
-    pub fn get_pos(&self) -> usize {
-        self.position
-    }
-}
-
 pub enum CursorDir {
     Left,
     Right,
@@ -136,5 +90,68 @@ impl Input {
         // used when scrolling up into the history.
         self.after = String::new();
         self.before = new_str;
+    }
+}
+pub enum HistoryEntry {
+    Query(usize),
+    Value(usize),
+}
+#[derive(Debug, Default)]
+pub struct Queries {
+    contents: Vec<(String, String)>,
+    pos: usize,
+    temp: Option<String>,
+}
+impl Queries {
+    pub fn try_store(&mut self, s: String) {
+        match self.temp {
+            None => self.temp = Some(s),
+            Some(_) => (),
+        };
+    }
+    pub fn try_restore(&mut self) -> Option<String> {
+        std::mem::take(&mut self.temp)
+    }
+    pub fn shift(&mut self, dir: ScrollDir) {
+        let max_len = self.contents.len();
+        self.pos = match dir {
+            ScrollDir::Up => std::cmp::min(self.pos + 1, max_len) as usize,
+            // bit messy but temporarily casting to i32 allows us to subtract 1 from 0.
+            ScrollDir::Down => std::cmp::max(self.pos as i32 - 1i32, 0i32) as usize,
+        };
+    }
+
+    pub fn scroll_reset(&mut self) {
+        self.pos = 0;
+    }
+    pub fn curr(&mut self) -> Option<String> {
+        // Any external calls to retrieve() can use zero-based indexing to access elements from the end of contents
+        // This internal call uses zero to represent a non-scrolling state, so n-1 gives the last element of the history
+        match self.pos {
+            0 => None,
+            n => Some(self.retrieve(HistoryEntry::Query(n - 1)).clone()),
+        }
+    }
+    fn from_end(&self, index: usize) -> usize {
+        std::cmp::max((self.contents.len() - index - 1) as i32, 0) as usize
+    }
+    pub fn retrieve(&self, entry: HistoryEntry) -> &String {
+        match entry {
+            HistoryEntry::Query(n) => &self.contents[self.from_end(n)].0,
+            HistoryEntry::Value(n) => &self.contents[self.from_end(n)].1,
+        }
+    }
+    pub fn archive(&mut self, input: String, output: String) {
+        self.contents.push((input, output));
+    }
+    pub fn render_all(&self) -> Vec<String> {
+        self.contents
+            .iter()
+            .rev()
+            .map(|(a, b)| format!("\n {} = {}", a, b))
+            .collect()
+    }
+    pub fn get_pos(&self) -> usize {
+        self.pos
     }
 }

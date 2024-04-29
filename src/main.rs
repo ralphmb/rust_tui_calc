@@ -1,14 +1,10 @@
 // TODO
 // - Enforce a depth limit in parser()?
 // - Remove all the clone()s
-// - Make a struct to store the history?
-// - - Will allow a better system for passing historic queries to input - it can return references to avoid cloning.
-// - - and will be able to enforce maximum length
-//
 // - PARSER: try the function f(x) = (x-3)^4
 // - - Parentheses aren't displayed
 // - Resizable panes?
-//
+
 use num_parser;
 use std::env;
 use std::io;
